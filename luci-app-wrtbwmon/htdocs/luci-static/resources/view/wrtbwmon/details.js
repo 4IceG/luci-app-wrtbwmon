@@ -6,7 +6,6 @@
 'require validation';
 
 var cachedData = [];
-var settings = {};
 var luciConfig = '/etc/luci-wrtbwmon.conf';
 var hostNameFile = '/etc/wrtbwmon.user';
 
@@ -36,52 +35,62 @@ function createOption(title, value, desc) {
 	]);
 }
 
-function displayTable(tb, sp) {
+function displayTable(tb, settings) {
 	var e, elmID, col, sortedBy, flag, IPVer;
-	var thID = ['', 'thMAC', 'thDownload', 'thUpload', 'thTotalDown', 'thTotalUp', 'thTotal', 'thFirstSeen', 'thLastSeen', 'thClient'];
+	var thID = ['thClient', 'thMAC', 'thDownload', 'thUpload', 'thTotalDown', 'thTotalUp', 'thTotal', 'thFirstSeen', 'thLastSeen', ''];
 
 	e = tb.querySelector('.th.sorted');
 	elmID = e ? e.id : 'thTotal';
 	sortedBy = e && e.classList.contains('ascent') ? 'asc' : 'desc';
 
 	col = thID.indexOf(elmID);
-	IPVer = col == 9 ? sp.value : null;
+	IPVer = col == 0 ? settings.protocol : null;
 	flag = sortedBy == 'desc' ? 1 : -1;
 
 	cachedData[0].sort(sortTable.bind(this, col, IPVer, flag));
 
 	//console.time('show');
-	updateTable(tb, cachedData, '<em>%s</em>'.format(_('Collecting data...')));
+	updateTable(tb, cachedData, '<em>%s</em>'.format(_('Collecting data...')), settings);
 	//console.timeEnd('show');
-	progressbar('downstream', cachedData[1][0], settings.downstream);
-	progressbar('upstream', cachedData[1][1], settings.upstream);
+	progressbar('downstream',
+		formatSpeed(cachedData[1][0], settings.useMultiple, settings.useBits),
+		formatBandWidth(settings.downstream, settings.useBits));
+	progressbar('upstream',
+		formatSpeed(cachedData[1][1], settings.useMultiple, settings.useBits),
+		formatBandWidth(settings.upstream, settings.useBits));
 }
 
-function formatBandWidth(bdw) {
-	return bdw * 1000 ** 2 / (settings.useBits ? 1 : 8);
+function formatBandWidth(bdw, useBits) {
+	return bdw * 1000 ** 2 / (useBits ? 1 : 8);
 }
 
-function formatSize(size) {
-	var res = String.format('%' + settings.useMultiple + '.2m' + (settings.useBits ? 'bit' : 'B'), settings.useBits ? size * 8 : size);
-	return settings.useMultiple == '1024' ? res.replace(/([KMGTPEZ])/, '$&i') : res;
+function formatSize(size, useMultiple, useBits) {
+	var res = String.format('%%%s.2m%s'.format(useMultiple, (useBits ? 'bit' : 'B')), useBits ? size * 8 : size);
+	return useMultiple == '1024' ? res.replace(/([KMGTPEZ])/, '$&i') : res;
 }
 
-function formatSpeed(speed) {
-	return formatSize(speed) + '/s';
+function formatSpeed(speed, useMultiple, useBits) {
+	return formatSize(speed, useMultiple, useBits) + '/s';
 }
 
 function formatDate(date) {
 	var d = new Date((/\W/g).test(date) ? date : date * 1000);
 	var Y = d.getFullYear(), M = d.getMonth() + 1, D = d.getDate();
 	var hh = d.getHours(), mm = d.getMinutes(), ss = d.getSeconds();
-	return Y + '/' + padStr(M) + '/' + padStr(D) + ' ' + padStr(hh) + ':' + padStr(mm) + ':' + padStr(ss);
+
+	return '%04d/%02d/%02d %02d:%02d:%02d'.format(Y, M, D, hh, mm, ss);
 }
 
-function getDSLBandwidth() {
-	callLuciDSLStatus().then(function(res) {
-		if (Object.keys(res).length) {
-			settings.upstream = res.max_data_rate_up;
-			settings.downstream = res.max_data_rate_down;
+function getDSLBandwidth(useDSL = false) {
+	return callLuciDSLStatus().then(function(res) {
+		if (Object.keys(res).length && useDSL) {
+			return {
+				upstream: res.max_data_rate_up,
+				downstream: res.max_data_rate_down
+			};
+		}
+		else {
+			return {};
 		}
 	})
 }
@@ -126,20 +135,20 @@ function handleConfig(ev) {
 		])
 	];
 
-	Promise.all([
-		body[1].querySelectorAll('select')
-			.forEach(function(select) {
+	parseDefaultSettings(luciConfig)
+	.then(function(settings) {
+		Promise.all([
+			body[1].querySelectorAll('select').forEach(function(select) {
 				select.value = settings[select.name] ? settings[select.name] : select.value;
-		}),
-		body[1].querySelectorAll('input[type=checkbox]')
-			.forEach(function(input) {
+			}),
+			body[1].querySelectorAll('input[type=checkbox]').forEach(function(input) {
 				input.checked = settings[input.name] ? 1 : 0;
-		}),
-		body[1].querySelectorAll('input[type=text]')
-			.forEach(function(input) {
+			}),
+			body[1].querySelectorAll('input[type=text]').forEach(function(input) {
 				input.value = settings[input.name] ? settings[input.name] : input.value;
-		})
-	])
+			})
+		]);
+	})
 	.then(function() {
 		body.push(E('div', { 'class': 'right' }, [
 			E('div', {
@@ -171,11 +180,12 @@ function handleConfig(ev) {
 						E('p', { 'class': 'spinning' }, _('Saving configuration data...'))
 					]);
 
-					return fs.write(luciConfig, JSON.stringify(data, undefined, '\t')).catch(function(err) {
+					return fs.write(luciConfig, JSON.stringify(data, undefined, '\t') + '\n')
+					.catch(function(err) {
 						ui.addNotification(null, E('p', {}, [ _('Unable to save %s: %s').format(luciConfig, err) ]));
 					})
 					.then(ui.hideModal)
-					.then(function() {document.location.reload();});
+					.then(function() { document.location.reload(); });
 				},
 				'disabled': !L.hasViewPermission() || null
 			}, _('Save'))
@@ -195,11 +205,7 @@ function loadCss(path) {
 	head.appendChild(link);
 }
 
-function padStr(str) {
-	return str < 10 ? '0' + str : str;
-}
-
-function parseDatabase(values, hosts) {
+function parseDatabase(values, hosts, showZero = false) {
 	var valArr = [], totals = [0, 0, 0, 0, 0], valToRows, row;
 
 	valToRows = values.replace(/(^\s*)|(\s*$)/g, '').split(/\r?\n|\r/g);
@@ -207,15 +213,15 @@ function parseDatabase(values, hosts) {
 
 	for (var i = 0; i < valToRows.length; i++) {
 		row = valToRows[i].split(',');
-		if (!(settings.showZero) && row[7] == 0) continue;
+		if (!showZero && row[7] == 0) continue;
 
 		for (var j = 0; j < totals.length; j++) {
 			totals[j] += parseInt(row[3 + j]);
 		}
 
-		row.copyWithin(2, 3).copyWithin(9, 1, 2).copyWithin(1, 0, 1);
+		row = Array.prototype.concat(row.slice(0, 2).reverse(), row.slice(3), row.slice(0, 1));
 		if (row[1] in hosts && hosts[row[1]] != '-') {
-			row[0] = hosts[row[1]];
+			row[9] = hosts[row[1]];
 		}
 		valArr.push(row);
 	}
@@ -225,6 +231,7 @@ function parseDatabase(values, hosts) {
 
 function parseDefaultSettings(file) {
 	return fs.trimmed(file).then(function(json) {
+		var settings;
 		try {
 			settings = JSON.parse(json);
 		}
@@ -238,8 +245,8 @@ function parseDefaultSettings(file) {
 function progressbar(query, v, m) {
 	var pg = $(query),
 	    vn = v || 0,
-	    mn = formatBandWidth(m) || 100,
-	    fv = formatSpeed(v),
+	    mn = m || 100,
+	    fv = v,
 	    pc = '%.2f'.format((100 / mn) * vn),
 	    wt = Math.floor(pc > 100 ? 100 : pc),
 	    bgc = (pc >= 95 ? 'red' : (pc >= 80 ? 'darkorange' : (pc >= 60 ? 'yellow' : 'lime'))),
@@ -252,56 +259,18 @@ function progressbar(query, v, m) {
 	}
 }
 
-function registerTableEventHandlers(table, si, sp, sm) {
+function registerTableEventHandlers(table, settings) {
 	var indicators = $('xhr_poll_status') || $('indicators').getElementsByTagName('span')[0];
 	indicators.addEventListener('click', function() {
-		si.value = L.Request.poll.active() ? L.Poll.queue[0].i : -1;
+		$('selectInterval').value = L.Request.poll.active() ? L.Poll.queue[0].i : -1;
 	});
 
 	table.querySelectorAll('.th').forEach( function(e) {
 		if (e) {
 			e.addEventListener('click', function (ev) {
 				setSortedColumn(ev.target);
-				displayTable(table, sp);
+				displayTable(table, settings);
 			});
-		}
-	});
-
-	si.addEventListener('change', function () {
-		if (this.value > 0) {
-			L.Poll.queue[0].i = parseInt(this.value);
-			if (!L.Request.poll.active()) L.Request.poll.start();
-		}
-		else {
-			L.Request.poll.stop();
-			setUpdateMessage($('updating'), -1);
-		}
-	});
-
-	$('resetDatabase').addEventListener('click', function () {
-		if (confirm(_('This will delete the database file. Are you sure?'))) {
-			getPath().then(function(res) {
-				var db = sp.value == 'ipv4' ? res : renameFile(res, '6');
-				fs.exec('/bin/rm', [db]).then(function() {
-					document.location.reload();
-				})
-			})
-		}
-	});
-
-	sm.addEventListener('click', function () {
-		var t = table.querySelector('.tr.table-totals').firstElementChild;
-		var showMore = this.checked;
-
-		t.textContent = _('TOTAL') + (showMore ? '' : ': ' + (table.childElementCount - 2));
-		t.nextElementSibling.textContent = showMore ? '%s %s'.format((table.childElementCount - 2), _('Clients')) : '';
-
-		table.querySelectorAll('.showMore').forEach(function(e) {
-			e.classList.toggle('hide');
-		});
-
-		if (!showMore && table.querySelector('.th.sorted').classList.contains('hide')) {
-			$('thTotal').click();
 		}
 	});
 }
@@ -311,6 +280,50 @@ function renameFile(str, tag) {
 	var n = fn.lastIndexOf('.'), bn = n > -1 ? fn.slice(0, n) : fn;
 	var n = fn.lastIndexOf('.'), en = n > -1 ? fn.slice(n + 1) : '';
 	return dir + bn + '.' + tag + (en ? '.' + en : '');
+}
+
+function resetDatabaseAction(settings) {
+	if (confirm(_('This will delete the database file. Are you sure?'))) {
+		getPath().then(function(res) {
+			var db = settings.protocol == 'ipv4' ? res : renameFile(res, '6');
+			fs.exec('/bin/rm', [db]).then(function() {
+				updateData(table, $('updated'), settings);
+			});
+		})
+	}
+}
+
+function selectIntervalAction(settings, ev) {
+	if (ev.target.value > 0) {
+		settings.interval = parseInt(ev.target.value);
+		L.Poll.queue[0].i = settings.interval;
+		if (!L.Request.poll.active()) L.Request.poll.start();
+	}
+	else {
+		L.Request.poll.stop();
+		setUpdateMessage($('updating'), -1);
+	}
+}
+
+function selectProtocolAction(settings, ev) {
+	settings.protocol = ev.target.value;
+	updateData($('traffic'), $('updated'), settings);
+}
+
+function showMoreAction(settings, ev) {
+	var table = $('traffic');
+	var t = table.querySelector('.tr.table-totals').firstElementChild;
+
+	settings.showMore = ev.target.checked
+	t.textContent = _('TOTAL') + (settings.showMore ? '' : ': ' + (table.childElementCount - 2));
+
+	table.querySelectorAll('.showMore').forEach(function(e) {
+		e.classList.toggle('hide');
+	});
+
+	if (!settings.showMore && table.querySelector('.th.sorted').classList.contains('hide')) {
+		table.querySelector('[id="thTotal"]').click();
+	}
 }
 
 function resolveCustomizedHostName() {
@@ -349,15 +362,15 @@ function resolveHostNameByMACAddr() {
 	});
 }
 
-function setSortedColumn(sorted) {
-	var e = document.querySelector('.th.sorted') || $('thTotal');
+function setSortedColumn(sorting) {
+	var sorted = document.querySelector('.th.sorted') || $('thTotal');
 
-	if (sorted.isSameNode(e)) {
-		e.classList.toggle('ascent');
+	if (sorting.isSameNode(sorted)) {
+		sorting.classList.toggle('ascent');
 	}
 	else {
-		sorted.classList.add('sorted');
-		e.classList.remove('sorted', 'ascent');
+		sorting.classList.add('sorted');
+		sorted.classList.remove('sorted', 'ascent');
 	}
 }
 
@@ -369,7 +382,7 @@ function sortTable(col, IPVer, flag, x, y) {
 	var byCol = x[col] == y[col] ? 1 : col;
 	var a = x[byCol], b = y[byCol];
 
-	if (!IPVer || byCol != 9) {
+	if (!IPVer || byCol != 0) {
 		if (!(a.match(/\D/g) || b.match(/\D/g)))
 			a = parseInt(a), b = parseInt(b);
 	}
@@ -379,34 +392,35 @@ function sortTable(col, IPVer, flag, x, y) {
 		: (a = validation.parseIPv6(a) || [0, 0, 0, 0, 0, 0, 0, 0], b = validation.parseIPv6(b) || [0, 0, 0, 0, 0, 0, 0, 0]);
 	}
 
+	if(Array.isArray(a) && Array.isArray(b)) {
+		for(var i = 0; i < a.length; i++) {
+			if (a[i] != b[i]) {
+				return (b[i] - a[i]) * flag;
+			}
+		}
+	}
+
 	return (a < b ? 1 : -1) * flag;
 }
 
-function updateData(table, sp, up) {
-	//console.time('start');
+function updateData(table, up, settings) {
+	console.time('start');
 	getPath().then(function(res) {
-		var params, data;
-		if (sp.value == 'ipv4'){
-			params = '-4';
-			data = res;
-		}
-		else {
-			params = '-6';
-			data = renameFile(res, '6');
-		}
+		var params = settings.protocol == 'ipv4' ? '-4' : '-6';
+
 		fs.exec('/usr/sbin/wrtbwmon', [params, '-f', res]);
-		return data;
+		return params == '-4' ? res : renameFile(res, '6');
 	}).then(function(data) {
 		Promise.all([
 			fs.exec('/bin/cat', [ data ]),
 			L.resolveDefault(resolveHostNameByMACAddr(), {})
 		]).then(function(res) {
-				cachedData = parseDatabase(res[0].stdout || '', res[1]);
-				displayTable(table, sp);
-				up.innerHTML = _('Last updated at %s.').format(formatDate(Math.round(Date.now() / 1000)));
+			cachedData = parseDatabase(res[0].stdout || '', res[1], settings.showZero);
+			displayTable(table, settings);
+			up.innerHTML = _('Last updated at %s.').format(formatDate(Math.round(Date.now() / 1000)));
 		});
 	});
-	//console.timeEnd('start');
+	console.timeEnd('start');
 }
 
 function updatePerSec(e) {
@@ -419,10 +433,10 @@ function updatePerSec(e) {
 	}
 }
 
-function updateTable(tb, values, placeholder) {
-	var doc = document, dom = doc.createDocumentFragment(), nodeLen = tb.childElementCount - 2;
+function updateTable(tb, values, placeholder, settings) {
+	var doc = document, df = doc.createDocumentFragment(), nodeLen = tb.childElementCount - 2;
 	var tbData = values[0], shadowNode, newNode, childTD, tabTitle = tb.firstElementChild;
-	var showMore = $('showMore').checked;
+	var showMore = settings.showMore;
 
 	// Create the shadow node, which will be used in the following.
 	if (tbData.length > nodeLen) {
@@ -435,11 +449,9 @@ function updateTable(tb, values, placeholder) {
 			childTD.appendChild(doc.createTextNode(''));
 			for (var j = 0; j < tabTitle.children.length; j++) {
 				childTD.className = 'td' + ('178'.indexOf(j) != -1 ? ' showMore' + (showMore ? '' : ' hide') : '');
-				childTD.setAttribute('data-title', tabTitle.children[j].innerHTML);
+				childTD.setAttribute('data-title', tabTitle.children[j].textContent);
 				shadowNode.appendChild(childTD.cloneNode(true));
 			}
-			shadowNode.firstElementChild.appendChild(doc.createElement('br'));
-			shadowNode.firstElementChild.appendChild(doc.createTextNode(''));
 		}
 	}
 
@@ -454,28 +466,27 @@ function updateTable(tb, values, placeholder) {
 		}
 
 		childTD = newNode.firstElementChild;
-		childTD.title = tbData[i][1];
-		childTD.lastChild.nodeValue = tbData[i].slice(-1);
+		childTD.title = tbData[i].slice(-1);
 		for (var j = 0; j < tabTitle.childElementCount; j++, childTD = childTD.nextElementSibling){
 			switch (j) {
 				case 2:
 				case 3:
-					childTD.textContent = formatSpeed(tbData[i][j]);
+					childTD.textContent = formatSpeed(tbData[i][j], settings.useMultiple, settings.useBits);
 					break;
 				case 4:
 				case 5:
 				case 6:
-					childTD.textContent = formatSize(tbData[i][j]);
+					childTD.textContent = formatSize(tbData[i][j], settings.useMultiple, settings.useBits);
 					break;
 				case 7:
 				case 8:
 					childTD.textContent = formatDate(tbData[i][j]);
 					break;
 				default:
-					childTD.firstChild.nodeValue = tbData[i][j];
+					childTD.textContent = tbData[i][j];
 			}
 		}
-		dom.appendChild(newNode);
+		df.appendChild(newNode);
 	}
 
 	// Remove the table data which has been deleted from the database.
@@ -484,8 +495,8 @@ function updateTable(tb, values, placeholder) {
 	}
 
 	//Append the totals or placeholder row.
-	dom.appendChild(tb.lastElementChild);
-	newNode = dom.lastElementChild;
+	df.appendChild(tb.lastElementChild);
+	newNode = df.lastElementChild;
 	if (newNode.classList.contains('table-totals')) {
 		if (tbData.length == 0) {
 			while (newNode.firstElementChild.firstChild.nextSibling) {
@@ -497,8 +508,8 @@ function updateTable(tb, values, placeholder) {
 	}
 	else {
 		if (tbData.length > 0) {
-			dom.replaceChild(shadowNode.cloneNode(true), newNode);
-			newNode = dom.lastElementChild;
+			df.replaceChild(shadowNode.cloneNode(true), newNode);
+			newNode = df.lastElementChild;
 			newNode.className = 'tr table-totals';
 
 			while (newNode.firstElementChild.firstChild.nextSibling) {
@@ -511,15 +522,21 @@ function updateTable(tb, values, placeholder) {
 
 	if (newNode.classList.contains('table-totals')) {
 		newNode.firstElementChild.textContent = _('TOTAL') + (showMore ? '' : ': ' + tbData.length);
-		newNode.firstElementChild.nextSibling.textContent = (!showMore ? '' : tbData.length + ' ') + _('Clients');
+		newNode.firstElementChild.nextSibling.textContent = tbData.length + ' ' + _('Clients');
 
 		for (var j = 0; j < values[1].length; j++) {
-			newNode.children[j + 2].textContent = j < 2 ? formatSpeed(values[1][j]) : formatSize(values[1][j]);
+			newNode.children[j + 2].textContent = j < 2
+				? formatSpeed(values[1][j], settings.useMultiple, settings.useBits)
+				: formatSize(values[1][j], settings.useMultiple, settings.useBits);
 		}
 	}
 
-	tb.appendChild(dom);
+	tb.appendChild(df);
 }
+
+(function() {
+	console.log(document.getElementById('traffic'));
+})();
 
 return L.view.extend({
 	load: function() {
@@ -529,26 +546,36 @@ return L.view.extend({
 		]);
 	},
 
-	render: function() {
+	render: function(data) {
+		var settings = data[0];
 		var node = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('Usage - Details')),
 			E('div', { 'id': 'control_panel' }, [
 				E('div', {}, [
 					E('label', {}, _('Protocol:')),
-					E('select', { 'id': 'selectProtocol' }, [
+					E('select', {
+						'id': 'selectProtocol',
+						'change': selectProtocolAction.bind(this, settings)
+						}, [
 						E('option', { 'value': 'ipv4' }, 'ipv4'),
 						E('option', { 'value': 'ipv6' }, 'ipv6')
 					])
 				]),
 				E('div', {}, [
 					E('label', { 'for': 'showMore' }, _('Show More Columns:')),
-					E('input', { 'id': 'showMore', 'type': 'checkbox' }),
+					E('input', {
+						'id': 'showMore',
+						'type': 'checkbox',
+						'click': showMoreAction.bind(this, settings)
+					}),
 				]),
 				E('div', {}, [
 					E('button', {
 						'class': 'btn cbi-button cbi-button-reset important',
-						'id': 'resetDatabase'
+						'id': 'resetDatabase',
+						'click': resetDatabaseAction.bind(this, settings)
 					}, _('Reset Database')),
+					' ',
 					E('button', {
 						'class': 'btn cbi-button cbi-button-neutral',
 						'click': handleConfig
@@ -562,7 +589,10 @@ return L.view.extend({
 				]),
 				E('div', {}, [
 					E('label', { 'for': 'selectInterval' }, _('Auto update every:')),
-					E('select', { 'id': 'selectInterval' }, [
+					E('select', {
+						'id': 'selectInterval',
+						'change': selectIntervalAction.bind(this, settings)
+						}, [
 						E('option', { 'value': '-1' }, _('Disabled')),
 						E('option', { 'value': '2' }, _('2 seconds')),
 						E('option', { 'value': '5' }, _('5 seconds')),
@@ -617,17 +647,17 @@ return L.view.extend({
 			node.querySelectorAll('.showMore'),
 			node.querySelector('[id="updated"]'),
 			node.querySelector('[id="updating"]'),
-			settings.useDSL ? getDSLBandwidth() : true
+			Object.assign(settings, getDSLBandwidth(settings.useDSL))
 		]).then(function(data) {
 			data[1].value = settings.interval;
 			data[2].value = settings.protocol;
-			data[3].checked = settings.showMore ? 1 : 0;
+			data[3].checked = settings.showMore;
 
 			Promise.all([
-				L.Poll.add(updateData.bind(this, data[0], data[2], data[5]), settings.interval),
+				L.Poll.add(updateData.bind(this, data[0], data[5], settings), settings.interval),
 				L.Poll.add(updatePerSec.bind(this, data[6]), 1),
 				data[4].forEach(function(e) { e.classList.toggle('hide', !settings.showMore); })
-			]).then(registerTableEventHandlers.bind(this, data[0], data[1], data[2], data[3]));
+			]).then(registerTableEventHandlers.bind(this, data[0], settings));
 		})
 
 		return node;
@@ -637,4 +667,3 @@ return L.view.extend({
 	handleSave: null,
 	handleReset: null
 });
-
